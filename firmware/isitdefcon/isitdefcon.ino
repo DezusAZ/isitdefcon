@@ -98,6 +98,8 @@ NetworkMode networkMode = MODE_NONE;
 
 // WiFi globals
 bool wifiConnected = false;
+WiFiServer wifiWebServer(80);
+bool wifiServerStarted = false;
 Preferences prefs;
 WebServer apServer(80);
 DNSServer dnsServer;
@@ -276,6 +278,12 @@ void setup() {
                     timeValid = true;
                     lastNtpSync = millis();
                 }
+
+                // Start WiFi web server - MUST be done after WiFi is connected
+                wifiWebServer.begin();
+                wifiServerStarted = true;
+                Serial.print("WiFi web server started at http://");
+                Serial.println(WiFi.localIP());
             } else {
                 Serial.println("Failed to connect to saved network, starting AP");
                 startAPMode();
@@ -1626,9 +1634,6 @@ void fetchNewsWiFi() {
 // WIFI WEB SERVER
 // ============================================================================
 
-WiFiServer wifiWebServer(80);
-bool wifiServerStarted = false;
-
 void handleWiFiWebClient() {
     // Start server if not already
     if (!wifiServerStarted) {
@@ -1908,7 +1913,6 @@ void handleWiFiWebClient() {
                     client.println("<a href=\"https://media.defcon.org\" target=\"_blank\">media.defcon.org - Archives</a>");
                     client.println("<a href=\"https://defcon.org/html/links/dc-ctf.html\" target=\"_blank\">DEF CON CTF</a>");
                     client.println("<a href=\"https://infocondb.org\" target=\"_blank\">infocondb.org - Info Archive</a>");
-                    client.println("<a href=\"https://twitter.com/defaborginc\" target=\"_blank\">@defaborginc - Twitter</a>");
                     client.println("<div class=\"credit\">");
                     client.println("<span>CREATED BY: DZAZ</span><br>");
                     client.println("<a href=\"https://www.instagram.com/dz_az02/\" target=\"_blank\">Instagram: @dz_az02</a>");
