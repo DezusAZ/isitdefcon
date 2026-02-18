@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(node server.js &\nsleep 1 && curl -s http://localhost:5000/api/check | python3 -m json.tool)",
+      "Bash(PORT=5001 node /media/distiller/4A21-0000/distiller-workspace/projects/isitdefcon/server.js &\nsleep 1 && curl -s http://localhost:5001/api/check | python3 -m json.tool\nsleep 0.5 && curl -s http://localhost:5001/api/events | python3 -m json.tool)",
+      "Bash(curl -s http://localhost:5001/api/check | python3 -m json.tool && curl -s http://localhost:5001/api/events | python3 -m json.tool)",
+      "Bash(kill $(lsof -ti:5001) 2>/dev/null; echo \"done\")",
+      "WebFetch"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

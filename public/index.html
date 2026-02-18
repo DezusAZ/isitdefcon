@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Is It DEF CON?</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="container" id="app">
+    <div class="main-card" id="main-card">
+      <div class="question" id="question">Is it DEF CON?</div>
+      <div class="answer" id="answer">
+        <span class="answer-text" id="answer-text">...</span>
+      </div>
+      <div class="detail" id="detail"></div>
+      <div class="countdown" id="countdown"></div>
+      <div class="event-meta" id="event-meta"></div>
+    </div>
+
+    <div class="event-selector" id="event-selector">
+      <label for="event-select">Check a different event:</label>
+      <select id="event-select">
+        <option value="">Loading...</option>
+      </select>
+    </div>
+
+    <div class="footer">
+      <p>Built for the network. Runs on a <a href="https://m5stack.com" target="_blank">m5Stack</a>.</p>
+      <p class="tiny">Add your own events by editing <code>events.json</code></p>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

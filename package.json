@@ -1,0 +1,15 @@
+{
+  "name": "isitdefcon",
+  "version": "1.0.0",
+  "description": "Is it DEF CON? A reusable date/event checker for the local network.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "PORT=5000 node server.js"
+  },
+  "engines": {
+    "node": ">=14"
+  },
+  "keywords": ["defcon", "hacking", "event", "network"],
+  "license": "MIT"
+}

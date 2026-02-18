@@ -1,0 +1,809 @@
+/*
+ * IsItDefcon - Standalone DEF CON Countdown
+ * Hardware: M5Stack CoreS3 SE + LAN Module 13.2 (W5500)
+ *
+ * Features:
+ * - Real-time countdown to DEF CON on LCD
+ * - Fetches live news from defcon.org RSS
+ * - Hosts web server for network visitors
+ * - NTP time synchronization over Ethernet
+ */
+
+#include <M5Unified.h>
+#include <M5GFX.h>
+#include <SPI.h>
+#include <M5Module_LAN.h>
+#include <time.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+
+#include "dc_logo.h"
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+const char* EVENT_NAME = "DEF CON 34";
+const char* EVENT_QUESTION = "Is it DEF CON?";
+const char* YES_MESSAGE = "Go hack something.";
+const char* NO_MESSAGE = "Not yet.";
+
+// DEF CON 34: August 6-9, 2026
+const int EVENT_START_YEAR = 2026;
+const int EVENT_START_MONTH = 8;
+const int EVENT_START_DAY = 6;
+const int EVENT_END_YEAR = 2026;
+const int EVENT_END_MONTH = 8;
+const int EVENT_END_DAY = 9;
+
+// Use rss2json.com to convert RSS to JSON over plain HTTP (no TLS needed)
+const char* NEWS_API_HOST = "api.rss2json.com";
+const char* NEWS_API_PATH = "/v1/api.json?rss_url=https://www.defcon.org/defconrss.xml";
+
+// NTP: time.cloudflare.com = 162.159.200.1
+IPAddress ntpServerIP(162, 159, 200, 1);
+
+// CoreS3 + LAN Module 13.2 pins
+uint8_t cs_pin = 1;
+uint8_t rst_pin = 0;
+uint8_t int_pin = 10;
+
+// ============================================================================
+// GLOBALS
+// ============================================================================
+
+M5Module_LAN LAN;
+EthernetServer server(80);
+EthernetUDP udp;
+
+byte mac[] = { 0xDE, 0xFC, 0x0D, 0x34, 0x20, 0x26 };
+
+#define MAX_NEWS 5
+String newsItems[MAX_NEWS];
+int newsCount = 0;
+int currentNews = 0;
+
+unsigned long lastNtpSync = 0;
+unsigned long lastRssFetch = 0;
+unsigned long lastNewsScroll = 0;
+unsigned long lastDisplayUpdate = 0;
+bool rssFetchedOnce = false;
+
+const unsigned long NTP_INTERVAL = 3600000;
+const unsigned long RSS_INTERVAL = 900000;
+const unsigned long NEWS_INTERVAL = 5000;
+const unsigned long DISPLAY_INTERVAL = 1000;
+
+bool isEventActive = false;
+bool eventPassed = false;
+int daysUntil = 0;
+int hoursUntil = 0;
+int minutesUntil = 0;
+int secondsUntil = 0;
+bool ethernetConnected = false;
+bool timeValid = false;
+
+M5Canvas canvas(&M5.Display);
+
+#define COLOR_BG       0x0000
+#define COLOR_YES      0x07E0
+#define COLOR_NO       0xF800
+#define COLOR_MUTED    0x4208
+#define COLOR_ACCENT   0x04DF
+#define COLOR_TEXT     0xDEFB
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void initEthernet();
+bool syncNTP();
+void fetchNews();
+void updateCountdown();
+void drawDisplay();
+void drawLogo();
+void drawStatus();
+void drawCountdown();
+void drawNews();
+void drawFooter();
+void handleWebClient();
+
+// ============================================================================
+// SETUP
+// ============================================================================
+
+void setup() {
+    auto cfg = M5.config();
+    cfg.internal_mic = false;
+    cfg.internal_spk = true;
+    M5.begin(cfg);
+
+    Serial.begin(115200);
+    Serial.println("\n\n=== DEF-CON Countdown Starting ===");
+
+    // Set pins based on board
+    m5::board_t board = M5.getBoard();
+    switch (board) {
+        case m5::board_t::board_M5Stack:
+            cs_pin = 5; rst_pin = 0; int_pin = 35;
+            break;
+        case m5::board_t::board_M5StackCore2:
+            cs_pin = 33; rst_pin = 0; int_pin = 35;
+            break;
+        case m5::board_t::board_M5StackCoreS3:
+        case m5::board_t::board_M5StackCoreS3SE:
+        default:
+            cs_pin = 1; rst_pin = 0; int_pin = 10;
+            break;
+    }
+
+    canvas.createSprite(320, 240);
+    canvas.setTextWrap(false);
+
+    canvas.fillSprite(COLOR_BG);
+    canvas.setTextColor(COLOR_TEXT);
+    canvas.setTextSize(2);
+    canvas.setCursor(40, 100);
+    canvas.println("DEF-CON Countdown");
+    canvas.setTextSize(1);
+    canvas.setCursor(80, 130);
+    canvas.println("Initializing...");
+    canvas.pushSprite(0, 0);
+
+    initEthernet();
+
+    if (ethernetConnected) {
+        canvas.setCursor(80, 150);
+        canvas.println("Syncing time...");
+        canvas.pushSprite(0, 0);
+
+        if (syncNTP()) {
+            timeValid = true;
+            lastNtpSync = millis();
+        }
+
+        // RSS fetch deferred to loop() - avoids heap exhaustion during boot
+        // lastRssFetch = 0 so it triggers on first loop iteration
+
+        server.begin();
+        Serial.print("Server at http://");
+        Serial.println(Ethernet.localIP());
+    }
+
+    delay(500);
+    drawDisplay();
+}
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+
+void loop() {
+    M5.update();
+    unsigned long now = millis();
+
+    Ethernet.maintain();
+
+    if (ethernetConnected && (now - lastNtpSync > NTP_INTERVAL)) {
+        syncNTP();
+        lastNtpSync = now;
+    }
+
+    // Fetch news: first time after 5s, then every RSS_INTERVAL (15 min)
+    bool newsReady = !rssFetchedOnce ? (now > 5000) : (now - lastRssFetch > RSS_INTERVAL);
+    if (ethernetConnected && newsReady) {
+        fetchNews();
+        lastRssFetch = now;
+        rssFetchedOnce = true;
+    }
+
+    if (newsCount > 0 && (now - lastNewsScroll > NEWS_INTERVAL)) {
+        currentNews = (currentNews + 1) % newsCount;
+        drawNews();
+        canvas.pushSprite(0, 0);
+        lastNewsScroll = now;
+    }
+
+    if (now - lastDisplayUpdate >= DISPLAY_INTERVAL) {
+        if (timeValid) updateCountdown();
+        drawCountdown();
+        drawFooter();
+        canvas.pushSprite(0, 0);
+        lastDisplayUpdate = now;
+    }
+
+    if (ethernetConnected) {
+        handleWebClient();
+    }
+
+    if (M5.Touch.getCount() > 0) {
+        auto t = M5.Touch.getDetail(0);
+        if (t.wasPressed()) {
+            Serial.println("Touch - refreshing news...");
+            if (ethernetConnected) {
+                fetchNews();
+                lastRssFetch = now;
+                rssFetchedOnce = true;
+            }
+            drawDisplay();
+        }
+    }
+
+    delay(10);
+}
+
+// ============================================================================
+// ETHERNET
+// ============================================================================
+
+void initEthernet() {
+    Serial.println("Initializing Ethernet...");
+
+    SPI.begin(SCK, MISO, MOSI, -1);
+
+    LAN.setResetPin(rst_pin);
+    LAN.reset();
+    LAN.init(cs_pin);
+
+    Serial.println("Getting IP via DHCP...");
+    canvas.setCursor(80, 150);
+    canvas.println("DHCP...");
+    canvas.pushSprite(0, 0);
+
+    int attempts = 0;
+    while (LAN.begin(mac) != 1 && attempts < 5) {
+        Serial.println("DHCP failed, retrying...");
+        attempts++;
+        delay(2000);
+    }
+
+    if (attempts >= 5) {
+        Serial.println("Ethernet FAILED");
+        ethernetConnected = false;
+        return;
+    }
+
+    if (Ethernet.hardwareStatus() == EthernetNoHardware) {
+        Serial.println("No Ethernet hardware");
+        ethernetConnected = false;
+        return;
+    }
+
+    ethernetConnected = true;
+    Serial.print("IP: ");
+    Serial.println(Ethernet.localIP());
+}
+
+// ============================================================================
+// NTP
+// ============================================================================
+
+bool syncNTP() {
+    Serial.println("Syncing NTP...");
+
+    if (udp.begin(8888) == 0) {
+        Serial.println("UDP begin failed");
+        return false;
+    }
+
+    byte packet[48];
+    memset(packet, 0, 48);
+    packet[0] = 0b11100011;
+    packet[1] = 0;
+    packet[2] = 6;
+    packet[3] = 0xEC;
+    packet[12] = 49;
+    packet[13] = 0x4E;
+    packet[14] = 49;
+    packet[15] = 52;
+
+    udp.beginPacket(ntpServerIP, 123);
+    udp.write(packet, 48);
+    udp.endPacket();
+
+    unsigned long start = millis();
+    while (millis() - start < 3000) {
+        int size = udp.parsePacket();
+        if (size >= 48) {
+            udp.read(packet, 48);
+            unsigned long hi = word(packet[40], packet[41]);
+            unsigned long lo = word(packet[42], packet[43]);
+            unsigned long secs1900 = (hi << 16) | lo;
+            unsigned long epoch = secs1900 - 2208988800UL;
+
+            struct timeval tv;
+            tv.tv_sec = epoch;
+            tv.tv_usec = 0;
+            settimeofday(&tv, NULL);
+
+            Serial.print("NTP OK: ");
+            Serial.println(epoch);
+            udp.stop();
+            return true;
+        }
+        delay(10);
+    }
+
+    Serial.println("NTP timeout");
+    udp.stop();
+    return false;
+}
+
+// ============================================================================
+// NEWS FETCH - Uses rss2json.com API over plain HTTP (no TLS needed)
+// ============================================================================
+
+void fetchNews() {
+    Serial.println("Fetching news via HTTP...");
+
+    // Cloudflare IP for api.rss2json.com (no DNS in M5-Ethernet library)
+    // This is a Cloudflare anycast IP - should be stable
+    IPAddress apiIP(104, 26, 10, 156);
+    Serial.print("API IP: ");
+    Serial.println(apiIP);
+
+    // Connect via plain HTTP (port 80)
+    EthernetClient client;
+    if (!client.connect(apiIP, 80)) {
+        Serial.println("HTTP connect failed");
+        return;
+    }
+
+    // Send HTTP GET request
+    client.print("GET ");
+    client.print(NEWS_API_PATH);
+    client.println(" HTTP/1.1");
+    client.print("Host: ");
+    client.println(NEWS_API_HOST);
+    client.println("Connection: close");
+    client.println();
+
+    // Wait for response
+    unsigned long timeout = millis() + 10000;
+    while (!client.available() && millis() < timeout) {
+        delay(10);
+    }
+    if (!client.available()) {
+        Serial.println("HTTP timeout");
+        client.stop();
+        return;
+    }
+
+    // Skip HTTP headers (find blank line)
+    bool headersEnded = false;
+    String headerLine = "";
+    while (client.available() && !headersEnded) {
+        char c = client.read();
+        if (c == '\n') {
+            if (headerLine.length() == 0 || headerLine == "\r") {
+                headersEnded = true;
+            }
+            headerLine = "";
+        } else if (c != '\r') {
+            headerLine += c;
+        }
+    }
+
+    // Parse JSON response - stream parse for "title" values in items array
+    // JSON structure: {"items":[{"title":"..."},{"title":"..."},...]}
+    newsCount = 0;
+    bool inItems = false;
+    bool capturingTitle = false;
+    String buffer = "";
+    buffer.reserve(256);
+    String titleValue = "";
+    titleValue.reserve(128);
+
+    timeout = millis() + 15000;
+    while (client.available() && millis() < timeout && newsCount < MAX_NEWS) {
+        char c = client.read();
+        buffer += c;
+
+        // Keep buffer manageable
+        if (buffer.length() > 200) {
+            buffer.remove(0, 100);
+        }
+
+        // Look for "items" array start
+        if (!inItems && buffer.endsWith("\"items\":[")) {
+            inItems = true;
+            buffer = "";
+        }
+
+        // Inside items array, look for "title":"
+        if (inItems && !capturingTitle && buffer.endsWith("\"title\":\"")) {
+            capturingTitle = true;
+            titleValue = "";
+            buffer = "";
+        }
+
+        // Capture title content until closing quote
+        if (capturingTitle) {
+            if (c == '"' && titleValue.length() > 0) {
+                // Check for escaped quote
+                if (titleValue.endsWith("\\")) {
+                    titleValue.remove(titleValue.length() - 1);
+                    titleValue += '"';
+                } else {
+                    // Title complete
+                    titleValue.trim();
+                    if (titleValue.length() > 0) {
+                        // Decode HTML entities
+                        titleValue.replace("&amp;", "&");
+                        titleValue.replace("&lt;", "<");
+                        titleValue.replace("&gt;", ">");
+                        titleValue.replace("&quot;", "\"");
+                        titleValue.replace("&#39;", "'");
+
+                        newsItems[newsCount] = titleValue;
+                        Serial.print("News[");
+                        Serial.print(newsCount);
+                        Serial.print("]: ");
+                        Serial.println(titleValue);
+                        newsCount++;
+                    }
+                    capturingTitle = false;
+                    titleValue = "";
+                }
+            } else if (c != '"') {
+                titleValue += c;
+                // Safety limit
+                if (titleValue.length() > 150) {
+                    capturingTitle = false;
+                    titleValue = "";
+                }
+            }
+        }
+    }
+
+    client.stop();
+    currentNews = 0;
+    Serial.print("News fetch done, items: ");
+    Serial.println(newsCount);
+}
+
+// ============================================================================
+// COUNTDOWN
+// ============================================================================
+
+void updateCountdown() {
+    time_t now;
+    time(&now);
+
+    // Target: August 6, 2026 at 5:00 AM Las Vegas time (PDT = UTC-7)
+    // 5:00 AM PDT = 12:00 UTC (noon)
+    // Use hardcoded UTC epoch for Aug 6, 2026 12:00:00 UTC
+    // Calculated: 1785960000 (seconds since Jan 1, 1970)
+    const time_t eventTime = 1785960000;  // Aug 6, 2026 12:00 UTC = 5 AM PDT
+
+    // Event end: Aug 10, 2026 07:00 UTC (midnight PDT end of Aug 9)
+    const time_t endTime = 1786302000;    // Aug 10, 2026 07:00 UTC
+
+    if (now >= eventTime && now < endTime) {
+        isEventActive = true;
+        eventPassed = false;
+        daysUntil = 0;
+        hoursUntil = 0;
+        minutesUntil = 0;
+        secondsUntil = 0;
+    } else if (now >= endTime) {
+        isEventActive = false;
+        eventPassed = true;
+    } else {
+        isEventActive = false;
+        eventPassed = false;
+
+        long diff = eventTime - now;
+
+        if (diff > 0) {
+            daysUntil = diff / 86400;
+            diff %= 86400;
+            hoursUntil = diff / 3600;
+            diff %= 3600;
+            minutesUntil = diff / 60;
+            secondsUntil = diff % 60;
+        }
+    }
+}
+
+// ============================================================================
+// DISPLAY
+// ============================================================================
+
+void drawDisplay() {
+    canvas.fillSprite(COLOR_BG);
+    drawLogo();
+    drawCountdown();
+    drawNews();
+    drawFooter();
+    canvas.pushSprite(0, 0);
+}
+
+void drawLogo() {
+    // Logo: 200x120, centered at top
+    int x = (320 - DC_LOGO_WIDTH) / 2;
+    canvas.pushImage(x, 2, DC_LOGO_WIDTH, DC_LOGO_HEIGHT, dc_logo);
+}
+
+void drawCountdown() {
+    // Countdown area: y=122 to y=210
+    canvas.fillRect(0, 122, 320, 88, COLOR_BG);
+
+    if (isEventActive) {
+        // IT'S HAPPENING
+        canvas.setTextColor(COLOR_YES);
+        canvas.setTextSize(2);
+        canvas.setCursor(55, 130);
+        canvas.print("IT'S DEF CON TIME!");
+        canvas.setTextColor(COLOR_TEXT);
+        canvas.setTextSize(1);
+        canvas.setCursor(90, 155);
+        canvas.print(YES_MESSAGE);
+        return;
+    }
+
+    if (eventPassed) {
+        canvas.setTextColor(COLOR_MUTED);
+        canvas.setTextSize(2);
+        canvas.setCursor(50, 140);
+        canvas.print("See you next year.");
+        return;
+    }
+
+    if (!timeValid) {
+        canvas.setTextColor(COLOR_MUTED);
+        canvas.setTextSize(1);
+        canvas.setCursor(100, 145);
+        canvas.print("Syncing time...");
+        return;
+    }
+
+    // Event name line
+    canvas.setTextColor(COLOR_ACCENT);
+    canvas.setTextSize(1);
+    char evtLine[40];
+    snprintf(evtLine, sizeof(evtLine), "%s  |  Aug %d-%d, %d",
+             EVENT_NAME, EVENT_START_DAY, EVENT_END_DAY, EVENT_START_YEAR);
+    int evtW = strlen(evtLine) * 6;
+    canvas.setCursor((320 - evtW) / 2, 124);
+    canvas.print(evtLine);
+
+    // Big day count
+    canvas.setTextColor(COLOR_NO);
+    canvas.setTextSize(4);
+    char dayStr[8];
+    snprintf(dayStr, sizeof(dayStr), "%d", daysUntil);
+    int dayW = strlen(dayStr) * 24;
+    canvas.setCursor((320 - dayW) / 2, 135);
+    canvas.print(dayStr);
+
+    // "DAYS" label
+    canvas.setTextColor(COLOR_MUTED);
+    canvas.setTextSize(1);
+    canvas.setCursor((320 - 24) / 2, 172);
+    canvas.print("DAYS");
+
+    // HH:MM:SS underneath
+    canvas.setTextColor(COLOR_TEXT);
+    canvas.setTextSize(2);
+    char hms[12];
+    snprintf(hms, sizeof(hms), "%02d:%02d:%02d", hoursUntil, minutesUntil, secondsUntil);
+    int hmsW = strlen(hms) * 12;
+    canvas.setCursor((320 - hmsW) / 2, 182);
+    canvas.print(hms);
+}
+
+void drawNews() {
+    canvas.fillRect(0, 213, 320, 14, COLOR_BG);
+    canvas.setTextSize(1);
+
+    if (newsCount == 0) {
+        canvas.setTextColor(COLOR_MUTED);
+        canvas.setCursor(5, 215);
+        canvas.print(ethernetConnected ? "Loading news..." : "No network");
+        return;
+    }
+
+    canvas.setTextColor(COLOR_TEXT);
+    canvas.setCursor(5, 215);
+    String item = newsItems[currentNews];
+    // Truncate if too long for display (52 chars at size 1)
+    if (item.length() > 52) {
+        item = item.substring(0, 49) + "...";
+    }
+    canvas.print(item);
+}
+
+void drawFooter() {
+    canvas.fillRect(0, 229, 320, 11, COLOR_BG);
+    canvas.setTextColor(COLOR_MUTED);
+    canvas.setTextSize(1);
+    canvas.setCursor(5, 230);
+    if (ethernetConnected) {
+        canvas.print(Ethernet.localIP());
+    } else {
+        canvas.print("No network");
+    }
+}
+
+// ============================================================================
+// WEB SERVER
+// ============================================================================
+
+void handleWebClient() {
+    EthernetClient client = server.available();
+    if (!client) return;
+
+    Serial.println("Client connected");
+
+    String request = "";
+    boolean currentLineIsBlank = true;
+    unsigned long timeout = millis() + 2000;
+
+    while (client.connected() && millis() < timeout) {
+        if (client.available()) {
+            char c = client.read();
+            request += c;
+
+            if (c == '\n' && currentLineIsBlank) {
+                // Request complete, parse path
+                String path = "/";
+                if (request.startsWith("GET ")) {
+                    int end = request.indexOf(" HTTP/");
+                    if (end > 4) path = request.substring(4, end);
+                }
+
+                Serial.print("Path: ");
+                Serial.println(path);
+
+                // Send response based on path
+                if (path == "/api/check") {
+                    client.println("HTTP/1.1 200 OK");
+                    client.println("Content-Type: application/json");
+                    client.println("Connection: close");
+                    client.println();
+                    client.print("{\"event\":\"");
+                    client.print(EVENT_NAME);
+                    client.print("\",\"active\":");
+                    client.print(isEventActive ? "true" : "false");
+                    client.print(",\"days_until\":");
+                    client.print(daysUntil);
+                    client.print(",\"hours_until\":");
+                    client.print(hoursUntil);
+                    client.print(",\"minutes_until\":");
+                    client.print(minutesUntil);
+                    client.print(",\"seconds_until\":");
+                    client.print(secondsUntil);
+                    client.print(",\"passed\":");
+                    client.print(eventPassed ? "true" : "false");
+                    client.println("}");
+
+                } else if (path == "/api/news") {
+                    client.println("HTTP/1.1 200 OK");
+                    client.println("Content-Type: application/json");
+                    client.println("Connection: close");
+                    client.println();
+                    client.print("{\"items\":[");
+                    for (int i = 0; i < newsCount; i++) {
+                        if (i > 0) client.print(",");
+                        client.print("\"");
+                        String t = newsItems[i];
+                        t.replace("\"", "\\\"");
+                        client.print(t);
+                        client.print("\"");
+                    }
+                    client.println("]}");
+
+                } else {
+                    // Single self-contained HTML page with inline CSS/JS
+                    client.println("HTTP/1.1 200 OK");
+                    client.println("Content-Type: text/html; charset=utf-8");
+                    client.println("Connection: close");
+                    client.println();
+                    client.println("<!DOCTYPE html><html><head>");
+                    client.println("<meta charset=\"UTF-8\">");
+                    client.println("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+                    client.println("<title>DEF-CON COUNTDOWN</title>");
+                    // Inline CSS
+                    client.println("<style>");
+                    client.println("*{margin:0;padding:0;box-sizing:border-box}");
+                    client.println("body{background:#000;color:#0f0;font-family:'Courier New',monospace;min-height:100vh;padding:1rem}");
+                    client.println(".c{max-width:600px;margin:0 auto}");
+                    client.println(".hdr{border:1px solid #0f0;padding:.5rem;margin-bottom:1rem;text-align:center}");
+                    client.println(".hdr h1{color:#0f0;font-size:1.5rem;text-shadow:0 0 10px #0f0}");
+                    client.println(".box{border:1px solid #030;padding:1rem;margin-bottom:1rem;background:#010}");
+                    client.println(".label{color:#060;font-size:.8rem;margin-bottom:.5rem}");
+                    client.println(".time{font-size:2.5rem;color:#0f0;text-shadow:0 0 8px #0f0;text-align:center;margin:.5rem 0}");
+                    client.println(".sub{color:#080;font-size:1rem;text-align:center}");
+                    client.println("ul{list-style:none}");
+                    client.println("li{padding:.4rem 0;border-bottom:1px solid #020;color:#0a0}");
+                    client.println("li:before{content:'> ';color:#060}");
+                    client.println("a{color:#0f0;text-decoration:none;display:block;padding:.3rem 0}");
+                    client.println("a:hover{text-shadow:0 0 5px #0f0}");
+                    client.println("a:before{content:'[ ';color:#060}a:after{content:' ]';color:#060}");
+                    client.println(".credit{margin-top:1rem;padding-top:1rem;border-top:1px solid #300;text-align:center}");
+                    client.println(".credit span{color:#f00}");
+                    client.println(".credit a{color:#f00;display:inline}");
+                    client.println(".credit a:before,.credit a:after{color:#600}");
+                    client.println(".f{text-align:center;color:#030;font-size:.7rem;margin-top:1rem}");
+                    client.println("</style></head><body>");
+                    client.println("<div class=\"c\">");
+                    // Header
+                    client.println("<div class=\"hdr\"><h1>DEF-CON COUNTDOWN</h1></div>");
+                    // Countdown box with server-side values
+                    client.println("<div class=\"box\">");
+                    client.println("<div class=\"label\">$ ./countdown --target defcon34</div>");
+                    client.print("<div class=\"time\">");
+                    if (isEventActive) {
+                        client.print("[ NOW ACTIVE ]");
+                    } else if (eventPassed) {
+                        client.print("[ COMPLETED ]");
+                    } else {
+                        client.print(daysUntil);
+                        client.print("d ");
+                        client.print(hoursUntil);
+                        client.print("h ");
+                        client.print(minutesUntil);
+                        client.print("m ");
+                        client.print(secondsUntil);
+                        client.print("s");
+                    }
+                    client.println("</div>");
+                    client.print("<div class=\"sub\">");
+                    client.print(EVENT_NAME);
+                    client.println(" // Aug 6-9, 2026 // Las Vegas</div>");
+                    client.println("</div>");
+                    // Info box - hardcoded DEF CON info
+                    client.println("<div class=\"box\">");
+                    client.println("<div class=\"label\">$ cat /etc/defcon/info.txt</div>");
+                    client.println("<ul>");
+                    client.println("<li>DEF CON 34 - Las Vegas Convention Center</li>");
+                    client.println("<li>August 6-9, 2026</li>");
+                    client.println("<li>The world's largest hacker convention</li>");
+                    client.println("<li>Villages, CTF, Talks, Parties, Hardware Hacking</li>");
+                    client.println("<li>Badge pickup starts Thursday</li>");
+                    client.println("</ul></div>");
+                    // Links box
+                    client.println("<div class=\"box\">");
+                    client.println("<div class=\"label\">$ cat /etc/defcon/resources.txt</div>");
+                    client.println("<a href=\"https://defcon.org\" target=\"_blank\">defcon.org - Official Site</a>");
+                    client.println("<a href=\"https://forum.defcon.org\" target=\"_blank\">forum.defcon.org - Community</a>");
+                    client.println("<a href=\"https://media.defcon.org\" target=\"_blank\">media.defcon.org - Archives</a>");
+                    client.println("<a href=\"https://defcon.org/html/links/dc-ctf.html\" target=\"_blank\">DEF CON CTF</a>");
+                    client.println("<a href=\"https://infocondb.org\" target=\"_blank\">infocondb.org - Info Archive</a>");
+                    client.println("<a href=\"https://twitter.com/defaborginc\" target=\"_blank\">@defaborginc - Twitter</a>");
+                    // Creator credit in red
+                    client.println("<div class=\"credit\">");
+                    client.println("<span>CREATED BY: DZAZ</span><br>");
+                    client.println("<a href=\"https://www.instagram.com/dz_az02/\" target=\"_blank\">Instagram: @dz_az02</a>");
+                    client.println("</div>");
+                    client.println("</div>");
+                    // Footer
+                    client.println("<div class=\"f\">// M5Stack CoreS3 SE // ESP32-S3 //</div>");
+                    client.println("</div>");
+                    // Inline JS for auto-refresh countdown
+                    // Target: Aug 6, 2026 at 5:00 AM PDT (Las Vegas) = 12:00 UTC
+                    client.println("<script>");
+                    client.println("const t=new Date('2026-08-06T05:00:00-07:00').getTime();");
+                    client.println("setInterval(()=>{const n=Date.now(),d=t-n;if(d>0){");
+                    client.println("const days=Math.floor(d/86400000),hrs=Math.floor((d%86400000)/3600000),");
+                    client.println("mins=Math.floor((d%3600000)/60000),secs=Math.floor((d%60000)/1000);");
+                    client.println("document.querySelector('.time').textContent=days+'d '+hrs+'h '+mins+'m '+secs+'s';}},1000);");
+                    client.println("</script>");
+                    client.println("</body></html>");
+                }
+                break;
+            }
+
+            if (c == '\n') {
+                currentLineIsBlank = true;
+            } else if (c != '\r') {
+                currentLineIsBlank = false;
+            }
+        }
+    }
+
+    delay(1);
+    client.stop();
+    Serial.println("Client disconnected");
+}

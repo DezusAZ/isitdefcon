@@ -1,0 +1,34 @@
+# Build artifacts
+/build/
+firmware/isitdefcon/build/
+firmware/.pio/
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+
+# Arduino build cache
+.arduino/
+*.ino.cpp
+
+# PlatformIO
+.pio/
+
+# IDE files
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node.js (for dev server)
+node_modules/
+npm-debug.log
+
+# Temporary files
+*.tmp
+*.log

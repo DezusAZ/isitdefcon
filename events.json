@@ -1,0 +1,41 @@
+{
+  "events": [
+    {
+      "id": "defcon33",
+      "name": "DEF CON 33",
+      "slug": "defcon",
+      "question": "Is it DEF CON?",
+      "yes_message": "YES! DEF CON is happening RIGHT NOW. Go hack something.",
+      "no_message": "NO. It is not DEF CON.",
+      "start": "2025-08-07",
+      "end": "2025-08-10",
+      "location": "Las Vegas Convention Center",
+      "url": "https://defcon.org"
+    },
+    {
+      "id": "defcon34",
+      "name": "DEF CON 34",
+      "slug": "defcon34",
+      "question": "Is it DEF CON 34?",
+      "yes_message": "YES! DEF CON 34 is happening RIGHT NOW. Go hack something.",
+      "no_message": "NO. It is not DEF CON 34.",
+      "start": "2026-08-06",
+      "end": "2026-08-09",
+      "location": "Las Vegas Convention Center",
+      "url": "https://defcon.org"
+    },
+    {
+      "id": "defcon35",
+      "name": "DEF CON 35",
+      "slug": "defcon35",
+      "question": "Is it DEF CON 35?",
+      "yes_message": "YES! DEF CON 35 is happening RIGHT NOW. Go hack something.",
+      "no_message": "NO. It is not DEF CON 35.",
+      "start": "2027-08-05",
+      "end": "2027-08-08",
+      "location": "Las Vegas Convention Center",
+      "url": "https://defcon.org"
+    }
+  ],
+  "default_event": "defcon34"
+}
