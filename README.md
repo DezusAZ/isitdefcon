@@ -72,7 +72,7 @@ isitdefcon/
 
 ## Credits
 
-Created by Sean Carolan (@scarolan)
+Created by DezusAZ (@DezusAZ)
 
 ## License
 
