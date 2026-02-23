@@ -1,14 +1,5 @@
-/*
- * IsItDefcon - Standalone DEF CON Countdown
- * Hardware: M5Stack CoreS3 SE + LAN Module 13.2 (W5500) or WiFi
- *
- * Features:
- * - Real-time countdown to DEF CON on LCD
- * - Fetches live news from defcon.org RSS
- * - Hosts web server for network visitors
- * - NTP time synchronization over Ethernet or WiFi
- * - WiFi provisioning via captive portal
- */
+// DEF CON Countdown - M5Stack CoreS3 SE
+// Ethernet (LAN Module 13.2) or WiFi
 
 #include <M5Unified.h>
 #include <M5GFX.h>
@@ -25,16 +16,13 @@
 
 #include "dc_logo.h"
 
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
 
 const char* EVENT_NAME = "DEF CON 34";
 const char* EVENT_QUESTION = "Is it DEF CON?";
 const char* YES_MESSAGE = "Go hack something.";
 const char* NO_MESSAGE = "Not yet.";
 
-// DEF CON 34: August 6-9, 2026
+
 const int EVENT_START_YEAR = 2026;
 const int EVENT_START_MONTH = 8;
 const int EVENT_START_DAY = 6;
@@ -42,21 +30,16 @@ const int EVENT_END_YEAR = 2026;
 const int EVENT_END_MONTH = 8;
 const int EVENT_END_DAY = 9;
 
-// Use rss2json.com to convert RSS to JSON over plain HTTP (no TLS needed)
 const char* NEWS_API_HOST = "api.rss2json.com";
 const char* NEWS_API_PATH = "/v1/api.json?rss_url=https://www.defcon.org/defconrss.xml";
 
-// NTP: time.cloudflare.com = 162.159.200.1
+
 IPAddress ntpServerIP(162, 159, 200, 1);
 
-// CoreS3 + LAN Module 13.2 pins
 uint8_t cs_pin = 1;
 uint8_t rst_pin = 0;
 uint8_t int_pin = 10;
 
-// ============================================================================
-// GLOBALS
-// ============================================================================
 
 M5Module_LAN LAN;
 EthernetServer server(80);
@@ -89,14 +72,10 @@ int secondsUntil = 0;
 bool ethernetConnected = false;
 bool timeValid = false;
 
-// ============================================================================
-// NETWORK MODE
-// ============================================================================
 
 enum NetworkMode { MODE_NONE, MODE_LAN, MODE_WIFI, MODE_AP };
 NetworkMode networkMode = MODE_NONE;
 
-// WiFi globals
 bool wifiConnected = false;
 WiFiServer wifiWebServer(80);
 bool wifiServerStarted = false;
@@ -105,13 +84,11 @@ WebServer apServer(80);
 DNSServer dnsServer;
 WiFiUDP wifiUdp;
 
-// AP mode config
 const char* AP_SSID = "DEFCON-SETUP";
 const IPAddress AP_IP(192, 168, 4, 1);
 const IPAddress AP_GATEWAY(192, 168, 4, 1);
 const IPAddress AP_SUBNET(255, 255, 255, 0);
 
-// WiFi scan results
 #define MAX_NETWORKS 10
 String scannedSSIDs[MAX_NETWORKS];
 int scannedRSSI[MAX_NETWORKS];
@@ -129,9 +106,6 @@ M5Canvas canvas(&M5.Display);
 #define COLOR_ACCENT   0x04DF
 #define COLOR_TEXT     0xDEFB
 
-// ============================================================================
-// FORWARD DECLARATIONS
-// ============================================================================
 
 void initEthernet();
 bool syncNTP();
@@ -148,11 +122,9 @@ void drawFooter();
 void handleWebClient();
 void handleWiFiWebClient();
 
-// Network mode selection
 NetworkMode showNetworkMenu();
 void drawNetworkMenu();
 
-// WiFi functions
 bool loadWiFiCredentials(String &ssid, String &password);
 void saveWiFiCredentials(const String &ssid, const String &password);
 void clearWiFiCredentials();
@@ -165,9 +137,6 @@ void handleAPConnect();
 void handleAPClear();
 void scanWiFiNetworks();
 
-// ============================================================================
-// SETUP
-// ============================================================================
 
 void setup() {
     auto cfg = M5.config();
@@ -300,9 +269,6 @@ void setup() {
     }
 }
 
-// ============================================================================
-// MAIN LOOP
-// ============================================================================
 
 void loop() {
     M5.update();
@@ -388,9 +354,7 @@ void loop() {
     delay(10);
 }
 
-// ============================================================================
 // ETHERNET
-// ============================================================================
 
 void initEthernet() {
     Serial.println("Initializing Ethernet...");
@@ -430,9 +394,7 @@ void initEthernet() {
     Serial.println(Ethernet.localIP());
 }
 
-// ============================================================================
 // NTP
-// ============================================================================
 
 bool syncNTP() {
     Serial.println("Syncing NTP...");
@@ -485,9 +447,7 @@ bool syncNTP() {
     return false;
 }
 
-// ============================================================================
 // NEWS FETCH - Uses rss2json.com API over plain HTTP (no TLS needed)
-// ============================================================================
 
 void fetchNews() {
     Serial.println("Fetching news via HTTP...");
@@ -618,9 +578,7 @@ void fetchNews() {
     Serial.println(newsCount);
 }
 
-// ============================================================================
 // COUNTDOWN
-// ============================================================================
 
 void updateCountdown() {
     time_t now;
@@ -662,9 +620,7 @@ void updateCountdown() {
     }
 }
 
-// ============================================================================
 // DISPLAY
-// ============================================================================
 
 void drawDisplay() {
     canvas.fillSprite(COLOR_BG);
@@ -787,9 +743,7 @@ void drawFooter() {
     }
 }
 
-// ============================================================================
 // WEB SERVER
-// ============================================================================
 
 void handleWebClient() {
     EthernetClient client = server.available();
@@ -969,9 +923,7 @@ void handleWebClient() {
     Serial.println("Client disconnected");
 }
 
-// ============================================================================
 // NETWORK MODE SELECTION MENU
-// ============================================================================
 
 void drawNetworkMenu() {
     canvas.fillSprite(COLOR_BG);
@@ -1072,9 +1024,7 @@ NetworkMode showNetworkMenu() {
     }
 }
 
-// ============================================================================
 // WIFI CREDENTIALS (NVS)
-// ============================================================================
 
 bool loadWiFiCredentials(String &ssid, String &password) {
     ssid = prefs.getString("wifi_ssid", "");
@@ -1098,9 +1048,7 @@ void clearWiFiCredentials() {
     Serial.println("WiFi credentials cleared");
 }
 
-// ============================================================================
 // WIFI CONNECTION
-// ============================================================================
 
 bool tryWiFiConnect(const String &ssid, const String &password) {
     Serial.print("Connecting to WiFi: ");
@@ -1164,9 +1112,7 @@ void scanWiFiNetworks() {
     WiFi.scanDelete();
 }
 
-// ============================================================================
 // AP MODE (CAPTIVE PORTAL)
-// ============================================================================
 
 void startAPMode() {
     networkMode = MODE_AP;
@@ -1459,9 +1405,7 @@ void handleAPClear() {
     ESP.restart();
 }
 
-// ============================================================================
 // WIFI NTP SYNC
-// ============================================================================
 
 bool syncNTPWiFi() {
     Serial.println("Syncing NTP over WiFi...");
@@ -1511,9 +1455,7 @@ bool syncNTPWiFi() {
     return false;
 }
 
-// ============================================================================
 // WIFI NEWS FETCH
-// ============================================================================
 
 void fetchNewsWiFi() {
     Serial.println("Fetching news via WiFi HTTP...");
@@ -1630,9 +1572,7 @@ void fetchNewsWiFi() {
     Serial.println(newsCount);
 }
 
-// ============================================================================
 // WIFI WEB SERVER
-// ============================================================================
 
 void handleWiFiWebClient() {
     // Start server if not already
