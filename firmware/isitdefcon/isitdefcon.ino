@@ -76,6 +76,27 @@ bool timeValid = false;
 enum NetworkMode { MODE_NONE, MODE_LAN, MODE_WIFI, MODE_AP };
 NetworkMode networkMode = MODE_NONE;
 
+enum DisplayMode { DISPLAY_COUNTDOWN, DISPLAY_CLOCK, DISPLAY_MATRIX };
+DisplayMode displayMode = DISPLAY_COUNTDOWN;
+DisplayMode lastActiveMode = DISPLAY_COUNTDOWN;
+
+#define MATRIX_COLS 26
+#define MATRIX_ROWS 20
+int matrixDrops[MATRIX_COLS];
+int matrixSpeed[MATRIX_COLS];
+unsigned long lastMatrixUpdate = 0;
+unsigned long lastInteraction = 0;
+const unsigned long SCREENSAVER_TIMEOUT = 60000;
+
+int timezoneOffset = 0;
+String timezoneName = "UTC";
+bool timezoneDetected = false;
+
+bool use24Hour = true;
+int dateFormat = 0;  // 0=YYYY-MM-DD, 1=MM/DD/YYYY, 2=DD/MM/YYYY, 3=Mon DD, YYYY
+int clockBgColor = 0;  // 0=black, 1=dark blue, 2=dark green, 3=dark red, 4=dark purple
+const uint16_t clockBgColors[] = {0x0000, 0x0010, 0x0200, 0x4000, 0x4010};
+
 bool wifiConnected = false;
 WiFiServer wifiWebServer(80);
 bool wifiServerStarted = false;
@@ -110,6 +131,10 @@ M5Canvas canvas(&M5.Display);
 void initEthernet();
 bool syncNTP();
 bool syncNTPWiFi();
+void detectTimezone();
+void detectTimezoneWiFi();
+void loadTimezone();
+void saveTimezone(int offset, const String &name);
 void fetchNews();
 void fetchNewsWiFi();
 void updateCountdown();
@@ -117,6 +142,9 @@ void drawDisplay();
 void drawLogo();
 void drawStatus();
 void drawCountdown();
+void initMatrix();
+void drawMatrix();
+void drawClock();
 void drawNews();
 void drawFooter();
 void handleWebClient();
@@ -178,8 +206,8 @@ void setup() {
     canvas.pushSprite(0, 0);
     delay(500);
 
-    // Initialize preferences for WiFi credentials
     prefs.begin("defcon", false);
+    loadTimezone();
 
     // Show network selection menu
     networkMode = showNetworkMenu();
@@ -203,6 +231,7 @@ void setup() {
             if (syncNTP()) {
                 timeValid = true;
                 lastNtpSync = millis();
+                if (!timezoneDetected) detectTimezone();
             }
 
             server.begin();
@@ -242,13 +271,13 @@ void setup() {
                 canvas.pushSprite(0, 0);
                 delay(1000);
 
-                // Sync time over WiFi
                 if (syncNTPWiFi()) {
                     timeValid = true;
                     lastNtpSync = millis();
+                    if (!timezoneDetected) detectTimezoneWiFi();
                 }
 
-                // Start WiFi web server - MUST be done after WiFi is connected
+                // Start WiFi web server
                 wifiWebServer.begin();
                 wifiServerStarted = true;
                 Serial.print("WiFi web server started at http://");
@@ -312,16 +341,20 @@ void loop() {
         rssFetchedOnce = true;
     }
 
-    if (newsCount > 0 && (now - lastNewsScroll > NEWS_INTERVAL)) {
+    if (displayMode == DISPLAY_COUNTDOWN && newsCount > 0 && (now - lastNewsScroll > NEWS_INTERVAL)) {
         currentNews = (currentNews + 1) % newsCount;
         drawNews();
         canvas.pushSprite(0, 0);
         lastNewsScroll = now;
     }
 
-    if (now - lastDisplayUpdate >= DISPLAY_INTERVAL) {
+    if (displayMode != DISPLAY_MATRIX && (now - lastDisplayUpdate >= DISPLAY_INTERVAL)) {
         if (timeValid) updateCountdown();
-        drawCountdown();
+        if (displayMode == DISPLAY_CLOCK) {
+            drawClock();
+        } else {
+            drawCountdown();
+        }
         drawFooter();
         canvas.pushSprite(0, 0);
         lastDisplayUpdate = now;
@@ -334,20 +367,48 @@ void loop() {
         handleWiFiWebClient();
     }
 
+    // Screensaver timeout
+    if (displayMode != DISPLAY_MATRIX && (now - lastInteraction > SCREENSAVER_TIMEOUT)) {
+        lastActiveMode = displayMode;
+        displayMode = DISPLAY_MATRIX;
+        initMatrix();
+    }
+
+    if (displayMode == DISPLAY_MATRIX && (now - lastMatrixUpdate > 120)) {
+        drawMatrix();
+        lastMatrixUpdate = now;
+    }
+
     if (M5.Touch.getCount() > 0) {
         auto t = M5.Touch.getDetail(0);
         if (t.wasPressed()) {
-            Serial.println("Touch - refreshing news...");
-            if (networkActive) {
-                if (networkMode == MODE_LAN) {
-                    fetchNews();
+            lastInteraction = now;
+            int x = t.x;
+            int y = t.y;
+
+            if (displayMode == DISPLAY_MATRIX) {
+                displayMode = lastActiveMode;
+                drawDisplay();
+            } else if (displayMode == DISPLAY_CLOCK) {
+                if (y >= 70 && y <= 130) {
+                    use24Hour = !use24Hour;
+                    prefs.putBool("use24h", use24Hour);
+                } else if (y >= 20 && y < 70) {
+                    dateFormat = (dateFormat + 1) % 4;
+                    prefs.putInt("datefmt", dateFormat);
+                } else if (y > 130 && y < 195) {
+                    clockBgColor = (clockBgColor + 1) % 5;
+                    prefs.putInt("clockbg", clockBgColor);
                 } else {
-                    fetchNewsWiFi();
+                    displayMode = DISPLAY_COUNTDOWN;
+                    lastActiveMode = DISPLAY_COUNTDOWN;
                 }
-                lastRssFetch = now;
-                rssFetchedOnce = true;
+                drawDisplay();
+            } else {
+                displayMode = DISPLAY_CLOCK;
+                lastActiveMode = DISPLAY_CLOCK;
+                drawDisplay();
             }
-            drawDisplay();
         }
     }
 
@@ -624,9 +685,13 @@ void updateCountdown() {
 
 void drawDisplay() {
     canvas.fillSprite(COLOR_BG);
-    drawLogo();
-    drawCountdown();
-    drawNews();
+    if (displayMode == DISPLAY_CLOCK) {
+        drawClock();
+    } else {
+        drawLogo();
+        drawCountdown();
+        drawNews();
+    }
     drawFooter();
     canvas.pushSprite(0, 0);
 }
@@ -703,6 +768,119 @@ void drawCountdown() {
     int hmsW = strlen(hms) * 12;
     canvas.setCursor((320 - hmsW) / 2, 182);
     canvas.print(hms);
+}
+
+void drawClock() {
+    uint16_t bgColor = clockBgColors[clockBgColor % 5];
+    canvas.fillRect(0, 0, 320, 213, bgColor);
+
+    if (!timeValid) {
+        canvas.setTextColor(COLOR_MUTED);
+        canvas.setTextSize(2);
+        canvas.setCursor(80, 100);
+        canvas.print("Syncing time...");
+        return;
+    }
+
+    time_t now = time(nullptr) + timezoneOffset;
+    struct tm* t = gmtime(&now);
+
+    const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    canvas.setTextColor(COLOR_ACCENT);
+    canvas.setTextSize(2);
+    char dateLine[20];
+    switch (dateFormat) {
+        case 1: snprintf(dateLine, sizeof(dateLine), "%02d/%02d/%04d", t->tm_mon + 1, t->tm_mday, t->tm_year + 1900); break;
+        case 2: snprintf(dateLine, sizeof(dateLine), "%02d/%02d/%04d", t->tm_mday, t->tm_mon + 1, t->tm_year + 1900); break;
+        case 3: snprintf(dateLine, sizeof(dateLine), "%s %d, %04d", months[t->tm_mon], t->tm_mday, t->tm_year + 1900); break;
+        default: snprintf(dateLine, sizeof(dateLine), "%04d-%02d-%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday); break;
+    }
+    int dateW = strlen(dateLine) * 12;
+    canvas.setCursor((320 - dateW) / 2, 30);
+    canvas.print(dateLine);
+
+    const char* days[] = {"SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"};
+    canvas.setTextColor(COLOR_MUTED);
+    canvas.setTextSize(1);
+    int dayW = strlen(days[t->tm_wday]) * 6;
+    canvas.setCursor((320 - dayW) / 2, 55);
+    canvas.print(days[t->tm_wday]);
+
+    canvas.setTextColor(COLOR_YES);
+    canvas.setTextSize(4);
+    char timeLine[16];
+    if (use24Hour) {
+        snprintf(timeLine, sizeof(timeLine), "%02d:%02d:%02d", t->tm_hour, t->tm_min, t->tm_sec);
+    } else {
+        int h = t->tm_hour % 12;
+        if (h == 0) h = 12;
+        snprintf(timeLine, sizeof(timeLine), "%2d:%02d:%02d%s", h, t->tm_min, t->tm_sec, t->tm_hour >= 12 ? "PM" : "AM");
+    }
+    int timeW = strlen(timeLine) * 24;
+    canvas.setCursor((320 - timeW) / 2, 85);
+    canvas.print(timeLine);
+
+    canvas.setTextColor(COLOR_MUTED);
+    canvas.setTextSize(1);
+    int tzW = timezoneName.length() * 6;
+    canvas.setCursor((320 - tzW) / 2, 130);
+    canvas.print(timezoneName);
+
+    canvas.setTextColor(COLOR_MUTED);
+    canvas.setTextSize(1);
+    canvas.setCursor(85, 195);
+    canvas.print("[ tap for countdown ]");
+}
+
+void initMatrix() {
+    for (int i = 0; i < MATRIX_COLS; i++) {
+        matrixDrops[i] = random(-MATRIX_ROWS, 0);
+        matrixSpeed[i] = random(1, 4);
+    }
+    canvas.fillSprite(0x0000);
+    canvas.pushSprite(0, 0);
+}
+
+void drawMatrix() {
+    canvas.fillSprite(0x0000);
+    canvas.setTextSize(1);
+
+    for (int col = 0; col < MATRIX_COLS; col++) {
+        int x = col * 12 + 4;
+        int dropY = matrixDrops[col];
+
+        for (int row = 0; row < MATRIX_ROWS; row++) {
+            int y = row * 12;
+            int dist = dropY - row;
+
+            if (dist >= 0 && dist < 12) {
+                char c = random(2) ? ('0' + random(2)) : (random(2) ? (char)random(0x30, 0x3A) : (char)random(0x41, 0x5B));
+
+                if (dist == 0) {
+                    canvas.setTextColor(0xFFFF);
+                } else if (dist < 3) {
+                    canvas.setTextColor(0x07E0);
+                } else if (dist < 6) {
+                    canvas.setTextColor(0x03E0);
+                } else if (dist < 9) {
+                    canvas.setTextColor(0x0200);
+                } else {
+                    canvas.setTextColor(0x0100);
+                }
+
+                canvas.setCursor(x, y);
+                canvas.print(c);
+            }
+        }
+
+        matrixDrops[col] += matrixSpeed[col];
+        if (matrixDrops[col] > MATRIX_ROWS + 12) {
+            matrixDrops[col] = random(-8, 0);
+            matrixSpeed[col] = random(1, 4);
+        }
+    }
+
+    canvas.pushSprite(0, 0);
 }
 
 void drawNews() {
@@ -1046,6 +1224,102 @@ void clearWiFiCredentials() {
     prefs.remove("wifi_ssid");
     prefs.remove("wifi_pass");
     Serial.println("WiFi credentials cleared");
+}
+
+void loadTimezone() {
+    timezoneOffset = prefs.getInt("tz_offset", 0);
+    timezoneName = prefs.getString("tz_name", "UTC");
+    timezoneDetected = prefs.getBool("tz_detected", false);
+    use24Hour = prefs.getBool("use24h", true);
+    dateFormat = prefs.getInt("datefmt", 0);
+    clockBgColor = prefs.getInt("clockbg", 0);
+    Serial.printf("Loaded timezone: %s (UTC%+d)\n", timezoneName.c_str(), timezoneOffset / 3600);
+}
+
+void saveTimezone(int offset, const String &name) {
+    timezoneOffset = offset;
+    timezoneName = name;
+    timezoneDetected = true;
+    prefs.putInt("tz_offset", offset);
+    prefs.putString("tz_name", name);
+    prefs.putBool("tz_detected", true);
+    Serial.printf("Saved timezone: %s (UTC%+d)\n", name.c_str(), offset / 3600);
+}
+
+void detectTimezone() {
+    Serial.println("Detecting timezone via IP geolocation...");
+    EthernetClient client;
+    if (!client.connect("ip-api.com", 80)) {
+        Serial.println("Failed to connect to ip-api.com");
+        return;
+    }
+    client.println("GET /json?fields=offset,timezone HTTP/1.1");
+    client.println("Host: ip-api.com");
+    client.println("Connection: close");
+    client.println();
+
+    unsigned long timeout = millis() + 5000;
+    while (client.connected() && millis() < timeout) {
+        if (client.available()) {
+            String line = client.readStringUntil('\n');
+            int tzIdx = line.indexOf("\"timezone\":\"");
+            if (tzIdx >= 0) {
+                int start = tzIdx + 12;
+                int end = line.indexOf("\"", start);
+                if (end > start) timezoneName = line.substring(start, end);
+            }
+            int offIdx = line.indexOf("\"offset\":");
+            if (offIdx >= 0) {
+                int start = offIdx + 9;
+                int end = line.indexOf(",", start);
+                if (end < 0) end = line.indexOf("}", start);
+                if (end > start) {
+                    timezoneOffset = line.substring(start, end).toInt();
+                    timezoneDetected = true;
+                }
+            }
+        }
+    }
+    client.stop();
+    if (timezoneDetected) {
+        prefs.putInt("tz_offset", timezoneOffset);
+        prefs.putString("tz_name", timezoneName);
+        prefs.putBool("tz_detected", true);
+        Serial.printf("Detected timezone: %s (UTC%+d)\n", timezoneName.c_str(), timezoneOffset / 3600);
+    }
+}
+
+void detectTimezoneWiFi() {
+    Serial.println("Detecting timezone via IP geolocation (WiFi)...");
+    HTTPClient http;
+    http.begin("http://ip-api.com/json?fields=offset,timezone");
+    int httpCode = http.GET();
+    if (httpCode == 200) {
+        String payload = http.getString();
+        int tzIdx = payload.indexOf("\"timezone\":\"");
+        if (tzIdx >= 0) {
+            int start = tzIdx + 12;
+            int end = payload.indexOf("\"", start);
+            if (end > start) timezoneName = payload.substring(start, end);
+        }
+        int offIdx = payload.indexOf("\"offset\":");
+        if (offIdx >= 0) {
+            int start = offIdx + 9;
+            int end = payload.indexOf(",", start);
+            if (end < 0) end = payload.indexOf("}", start);
+            if (end > start) {
+                timezoneOffset = payload.substring(start, end).toInt();
+                timezoneDetected = true;
+            }
+        }
+        if (timezoneDetected) {
+            prefs.putInt("tz_offset", timezoneOffset);
+            prefs.putString("tz_name", timezoneName);
+            prefs.putBool("tz_detected", true);
+            Serial.printf("Detected timezone: %s (UTC%+d)\n", timezoneName.c_str(), timezoneOffset / 3600);
+        }
+    }
+    http.end();
 }
 
 // WIFI CONNECTION
@@ -1680,6 +1954,29 @@ void handleWiFiWebClient() {
                     delay(3000);
                     ESP.restart();
 
+                } else if (path.startsWith("/timezone?") || request.indexOf("POST /timezone") >= 0) {
+                    String body = "";
+                    while (client.available()) body += (char)client.read();
+                    int offIdx = path.indexOf("offset=");
+                    if (offIdx < 0) offIdx = body.indexOf("offset=");
+                    if (offIdx >= 0) {
+                        int start = offIdx + 7;
+                        int end = path.indexOf("&", start);
+                        if (end < 0) end = body.indexOf("&", start);
+                        if (end < 0) end = (offIdx < path.length() ? path.length() : body.length());
+                        String offStr = (offIdx < path.length()) ? path.substring(start, end) : body.substring(start - path.length(), end - path.length());
+                        int offsetHours = offStr.toInt();
+                        int offsetSecs = offsetHours * 3600;
+                        String tzName = "UTC";
+                        if (offsetHours > 0) tzName = "UTC+" + String(offsetHours);
+                        else if (offsetHours < 0) tzName = "UTC" + String(offsetHours);
+                        saveTimezone(offsetSecs, tzName);
+                    }
+                    client.println("HTTP/1.1 302 Found");
+                    client.println("Location: /#settings");
+                    client.println("Connection: close");
+                    client.println();
+
                 } else if (path.startsWith("/connect?") || request.indexOf("POST /connect") >= 0) {
                     // Parse WiFi credentials from POST or GET
                     String ssid = "";
@@ -1893,6 +2190,29 @@ void handleWiFiWebClient() {
                     client.println("<button type=\"submit\">Save &amp; Reboot</button>");
                     client.println("</form>");
                     client.println("<p style=\"margin-top:15px\"><a href=\"/clear\" class=\"warn\" onclick=\"return confirm('Clear WiFi credentials?')\">Clear Saved Credentials</a></p>");
+                    client.println("</div>");
+
+                    client.println("<div class=\"box\">");
+                    client.println("<div class=\"label\">$ ./timezone --set</div>");
+                    client.print("<p>Current: <strong>");
+                    client.print(timezoneName);
+                    client.println("</strong></p>");
+                    client.println("<form action=\"/timezone\" method=\"POST\" style=\"margin-top:10px\">");
+                    client.println("<select name=\"offset\" style=\"background:#010;border:1px solid #030;color:#0f0;padding:8px;width:100%\">");
+                    for (int h = -12; h <= 14; h++) {
+                        client.print("<option value=\"");
+                        client.print(h);
+                        client.print("\"");
+                        if (h * 3600 == timezoneOffset) client.print(" selected");
+                        client.print(">");
+                        if (h >= 0) client.print("UTC+");
+                        else client.print("UTC");
+                        client.print(h);
+                        client.println("</option>");
+                    }
+                    client.println("</select>");
+                    client.println("<button type=\"submit\" style=\"margin-top:10px\">Save Timezone</button>");
+                    client.println("</form>");
                     client.println("</div>");
 
                     // Footer
